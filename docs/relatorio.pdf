@@ -1,0 +1,377 @@
+# Relatório — Chat em Rede com Sockets e Threads
+
+## Identificação
+
+| Campo | Informação |
+| --- | --- |
+| Disciplina | Redes de Computadores 2026.1 — UFAL |
+| Professor | Almir Pereira Guimarães |
+| Integrantes | Marcela Rocha Silva, Emilly Vitória Santana Alves, Fernando Emídio Belfort do Rego, Pedro Henrique Sá de Oliveira, João Euclides da Silva Melo |
+| Repositório | <https://github.com/marrcelarocha/chat-redes.git> |
+| Linguagem | Python 3.8 ou superior, sem bibliotecas externas |
+
+## Introdução
+
+O projeto implementa um chat em rede no modelo cliente-servidor, em que vários usuários conversam ao mesmo tempo em salas e por mensagens privadas. A comunicação usa sockets TCP do módulo `socket` do Python, e a concorrência é feita com threads do módulo `threading`.
+
+Todos os requisitos da disciplina foram atendidos:
+
+- **Linguagem Python**, usando apenas a biblioteca padrão.
+- **Sockets com funções primitivas**: `socket()`, `bind()`, `listen()`, `accept()`, `connect()`, `sendall()` e `recv()`, além de `input()` e `print()` para entrada e saída. Como o projeto usa Python 3, `input()` substitui o antigo `raw_input()` do Python 2.
+- **Sem Websockets**: toda a comunicação é feita diretamente sobre TCP.
+- **Uso obrigatório de threads**: o servidor cria uma thread por cliente e o cliente usa uma thread dedicada para receber mensagens.
+
+## Arquitetura e funcionalidades
+
+A aplicação tem dois programas: `server.py`, que centraliza as conexões, e `client.py`, executado por cada usuário. Os clientes nunca se comunicam diretamente entre si: toda mensagem vai ao servidor, que decide para quem repassá-la.
+
+O servidor guarda os usuários conectados em um dicionário que associa cada apelido ao seu socket e à sala em que está. Com isso ele consegue entregar uma mensagem a todos de uma sala ou a um único destinatário.
+
+As funcionalidades implementadas são:
+
+| Funcionalidade | Como funciona |
+| --- | --- |
+| Apelido único | Ao conectar, o usuário escolhe um apelido; o servidor recusa apelidos repetidos, vazios, com espaços ou com mais de 15 caracteres |
+| Mensagens em sala | Texto comum é enviado a todos que estão na mesma sala; todos começam na sala `general` |
+| Salas | `/join <sala>` muda de sala, criando-a se não existir; os membros das duas salas são avisados |
+| Mensagem privada | `/msg <apelido> <texto>` entrega a mensagem apenas ao destinatário, com cópia para o remetente |
+| Lista de usuários | `/users` mostra quem está online |
+| Lista de salas | `/rooms` mostra as salas ativas e quantas pessoas há em cada uma |
+| Ajuda | `/help` lista os comandos; comandos desconhecidos geram um aviso |
+| Saída | `/quit` encerra a conexão de forma organizada |
+| Avisos automáticos | O servidor avisa a sala quando alguém entra, sai ou cai |
+| Tolerância a quedas | Se um cliente fecha a janela de repente, o servidor remove o usuário e continua funcionando |
+
+## Protocolos implementados
+
+A aplicação usa TCP na camada de transporte e um protocolo de aplicação próprio, baseado em linhas de texto.
+
+### Camada de transporte: TCP
+
+O TCP foi escolhido porque garante que as mensagens cheguem completas, sem perdas e na ordem em que foram enviadas, o que é essencial em um chat. Os sockets são criados com `socket.AF_INET` (IPv4) e `socket.SOCK_STREAM` (TCP). O servidor escuta na porta 5050 em todas as interfaces de rede (`0.0.0.0`), e o cliente se conecta ao IP do servidor informado na linha de comando.
+
+### Camada de aplicação: linhas de texto
+
+Cada mensagem é uma linha de texto codificada em UTF-8 e terminada pelo caractere de quebra de linha (`\n`). O cliente envia exatamente o que o usuário digita; o servidor interpreta as linhas que começam com `/` como comandos e as demais como mensagens para a sala.
+
+O delimitador `\n` resolve uma característica importante do TCP: ele transmite um fluxo contínuo de bytes, e não mensagens separadas. Uma chamada a `recv()` pode trazer só um pedaço de uma mensagem, ou duas mensagens coladas. Por isso o servidor acumula os bytes recebidos em um buffer e só processa uma mensagem quando encontra o `\n`. A conversão dos bytes para texto é feita apenas sobre a linha completa, o que evita erros quando um caractere acentuado chega dividido entre dois `recv()`.
+
+### Fluxo de uma sessão
+
+1. O cliente conecta e o servidor responde pedindo o apelido.
+2. O cliente envia o apelido; o servidor valida e confirma ou pede outro.
+3. A partir daí, cada linha enviada é um comando ou uma mensagem, e o servidor responde ou repassa conforme o caso.
+4. O cliente envia `/quit`, o servidor responde com uma despedida e fecha a conexão. Se o cliente cair sem enviar `/quit`, o servidor percebe pelo `recv()` vazio ou por um erro de conexão e faz a mesma limpeza.
+
+As mensagens enviadas pelo servidor seguem formatos fixos, que deixam claro o tipo de cada uma:
+
+| Tipo | Formato |
+| --- | --- |
+| Mensagem de sala | `[sala] apelido: texto` |
+| Mensagem privada recebida | `[private from apelido] texto` |
+| Mensagem privada enviada | `[private to apelido] texto` |
+| Aviso do servidor | `* apelido joined the room.` |
+
+## Threads e concorrência
+
+As threads são o que permite à aplicação atender vários usuários ao mesmo tempo. Sem elas, o servidor ficaria preso esperando um único cliente, e o cliente não conseguiria receber mensagens enquanto o usuário digita.
+
+**No servidor**, a thread principal fica em um laço chamando `accept()`. A cada nova conexão, ela cria uma thread que executa a função `handle_client`, responsável por ler e tratar as mensagens daquele usuário. Assim, cada cliente é atendido de forma independente, e um cliente lento ou parado não atrasa os outros.
+
+**No cliente**, a thread principal lê o teclado com `input()` e envia as mensagens, enquanto uma segunda thread, a função `receive`, fica permanentemente em `recv()` exibindo o que chega do servidor. As duas operações bloqueiam, por isso precisam acontecer em threads separadas.
+
+### Controle de concorrência com Lock
+
+Todas as threads do servidor acessam o mesmo dicionário `clients`. Se uma thread adicionasse um usuário enquanto outra percorria o dicionário para enviar uma mensagem, o programa poderia falhar ou se comportar de forma inconsistente. Para evitar isso, o servidor usa um `threading.Lock`: todo trecho que lê ou altera o dicionário fica dentro de um bloco `with lock:`, garantindo que apenas uma thread por vez o acesse.
+
+Um exemplo é o cadastro de apelido: verificar se o nome já existe e registrá-lo acontecem dentro do mesmo bloco protegido. Sem o Lock, dois usuários que tentassem o mesmo apelido no mesmo instante poderiam ser aceitos.
+
+Para não bloquear as outras threads por muito tempo, os envios pela rede ficam fora do Lock: o servidor copia a lista de destinatários dentro do bloco protegido e só depois envia as mensagens.
+
+As threads são criadas com `daemon=True`, o que faz com que sejam encerradas automaticamente quando o servidor é finalizado.
+
+## Execução e testes
+
+As instruções completas estão no arquivo README, entregue junto com o projeto. Em resumo, a partir da pasta principal do projeto:
+
+1. Iniciar o servidor com `python src/server.py`.
+2. Em outro terminal, iniciar cada cliente com `python src/client.py`, ou `python src/client.py <IP_DO_SERVIDOR>` quando o servidor estiver em outro computador.
+3. Digitar um apelido e usar o chat; `/help` mostra os comandos.
+
+O IP do servidor é obtido com `ipconfig` no Windows ou `ip addr` no Linux. Como esse endereço é privado, servidor e clientes precisam estar na mesma rede local.
+
+A aplicação foi testada primeiro com servidor e vários clientes em um mesmo computador, e depois com notebooks diferentes na mesma rede Wi-Fi. Os cenários verificados foram:
+
+| Cenário | Resultado esperado |
+| --- | --- |
+| Mensagem na sala | Todos da sala recebem |
+| Apelido repetido ou inválido | Servidor recusa e pede outro |
+| Mensagem privada | Só o destinatário recebe |
+| Destinatário inexistente | Aviso de usuário não encontrado |
+| Troca de sala | Mensagens da sala anterior deixam de chegar; membros são avisados |
+| `/users` e `/rooms` | Listas corretas de usuários e salas |
+| Texto com acentos | Exibido corretamente em todos os clientes |
+| Saída com `/quit` | Despedida e aviso aos demais |
+| Fechamento abrupto de um cliente | Servidor continua funcionando e remove o usuário |
+| Encerramento do servidor | Clientes exibem que a conexão foi encerrada |
+
+Nos testes em um único computador, os clientes aparecem no servidor com o IP `127.0.0.1`, o endereço de loopback, pois a conexão não sai da máquina. Nos testes entre notebooks aparecem os IPs privados da rede, como `192.168.x.x`.
+
+## O que poderia ter sido implementado a mais
+
+- **Conexão pela internet**: hoje servidor e clientes precisam estar na mesma rede local, por causa dos IPs privados e do NAT dos roteadores. Hospedar o servidor em uma máquina na nuvem, com IP público, permitiria conexões de qualquer lugar.
+- **Interface gráfica**: uma janela feita com Tkinter, com área de mensagens e campo de digitação separados. No terminal, uma mensagem recebida pode aparecer no meio do texto que o usuário está digitando.
+- **Histórico de mensagens**: guardar as últimas mensagens de cada sala e enviá-las a quem acaba de entrar.
+- **Horário nas mensagens**: exibir a hora de envio ao lado de cada mensagem.
+- **Envio de arquivos**: transferir arquivos entre usuários, o que exigiria indicar o tamanho do arquivo antes dos dados, já que um arquivo pode conter o caractere `\n`.
+- **Autenticação**: cadastro com senha, para que um apelido pertença sempre à mesma pessoa.
+- **Criptografia**: as mensagens trafegam em texto puro e podem ser lidas por quem capturar o tráfego da rede; o uso de TLS, pelo módulo `ssl`, resolveria isso.
+- **Moderação**: comandos para remover usuários ou silenciar uma sala.
+
+## Dificuldades encontradas
+
+**Mensagens fragmentadas ou coladas.** No início, cada `recv()` era tratado como uma mensagem completa. Isso funciona na maioria dos testes locais, mas não é garantido: o TCP é um fluxo de bytes e pode dividir ou juntar mensagens. A solução foi definir o `\n` como delimitador e acumular os dados em um buffer até a linha estar completa.
+
+**Caracteres acentuados.** Em UTF-8, letras como "ç" e "ã" ocupam mais de um byte. Se um `recv()` terminasse no meio de um desses caracteres, a decodificação falharia. Passamos a decodificar apenas linhas completas, depois de separadas pelo delimitador.
+
+**Ctrl+C não encerrava o servidor no Windows.** O servidor ficava bloqueado em `accept()`, e no Windows o Python só trata o Ctrl+C quando essa chamada retorna. Resolvemos definindo um tempo limite de 1 segundo no socket do servidor: o `accept()` retorna periodicamente, o que permite ao Python perceber o Ctrl+C. Os sockets dos clientes voltam a esperar sem limite de tempo.
+
+**Acesso simultâneo aos dados.** Várias threads leem e alteram a lista de usuários ao mesmo tempo. Foi preciso identificar todos os trechos que acessam esses dados e protegê-los com um Lock, sem segurar a trava durante os envios pela rede.
+
+**Quedas abruptas de clientes.** Quando um usuário fecha a janela sem usar `/quit`, o servidor precisa perceber a desconexão, remover o usuário e avisar a sala, sem deixar a falha afetar os outros clientes. Isso foi tratado com `try/except/finally` na thread de cada cliente.
+
+**Testes entre computadores diferentes.** Nos primeiros testes, tudo rodava na mesma máquina, e o servidor mostrava os clientes com o IP `127.0.0.1`. Para testar entre notebooks foi necessário entender a diferença entre o endereço de loopback e os IPs privados, descobrir o IP do servidor com `ipconfig` e liberar a porta no firewall. Também percebemos que redes públicas, como a da universidade, podem bloquear a comunicação entre aparelhos, e usamos o roteador de um celular como alternativa.
+
+**Simplificação do código.** Uma primeira versão usava cabeçalhos binários com `struct` e mensagens em JSON. Ela foi reescrita com um protocolo em texto, mais simples de entender, explicar e depurar, mantendo as mesmas funcionalidades.
+
+## Conclusão
+
+O projeto resultou em um chat funcional com salas, mensagens privadas e tolerância a quedas, usando apenas sockets TCP e threads da biblioteca padrão do Python. O desenvolvimento permitiu aplicar na prática conceitos estudados na disciplina, como o modelo cliente-servidor, o funcionamento do TCP como fluxo de bytes, a definição de um protocolo de aplicação, o endereçamento IP em redes locais e o controle de concorrência entre threads.
+
+## Apêndice: código-fonte
+
+### src/server.py
+
+```python
+import socket
+import threading
+
+HOST = "0.0.0.0"   # listen on all network interfaces
+PORT = 5050
+
+# Connected clients: nickname -> {"sock": socket, "room": room name}
+clients = {}
+
+# Lock used whenever a thread reads or changes the "clients" dictionary
+lock = threading.Lock()
+
+
+def send(sock, text):
+    """Send one line of text to a client."""
+    try:
+        sock.sendall((text + "\n").encode("utf-8"))
+    except OSError:
+        pass  # if the client dropped, its own thread handles the cleanup
+
+
+def send_to_room(room, text, exclude=None):
+    """Send a text to everyone in the room (except 'exclude')."""
+    with lock:
+        targets = [data["sock"] for name, data in clients.items()
+                   if data["room"] == room and name != exclude]
+    for sock in targets:
+        send(sock, text)
+
+
+def register(sock, nickname):
+    """Try to register the nickname. Return the nickname on success, or None."""
+    if nickname == "" or " " in nickname or len(nickname) > 15:
+        send(sock, "Invalid nickname (no spaces, up to 15 characters). Try another one:")
+        return None
+    with lock:
+        if nickname in clients:
+            taken = True
+        else:
+            taken = False
+            clients[nickname] = {"sock": sock, "room": "general"}
+    if taken:
+        send(sock, "That nickname is already in use. Try another one:")
+        return None
+    send(sock, f"Welcome, {nickname}! You are in the 'general' room. Type /help to see the commands.")
+    send_to_room("general", f"* {nickname} joined the room.", exclude=nickname)
+    return nickname
+
+
+def handle_message(nickname, line):
+    """Interpret a line sent by the client. Return False if the client wants to quit."""
+    sock = clients[nickname]["sock"]
+    room = clients[nickname]["room"]
+
+    if line == "/quit":
+        send(sock, "Goodbye!")
+        return False
+
+    elif line == "/help":
+        send(sock, "Commands: /join <room>, /msg <nickname> <text>, /users, /rooms, /quit")
+
+    elif line == "/users":
+        with lock:
+            names = sorted(clients.keys())
+        send(sock, "Online: " + ", ".join(names))
+
+    elif line == "/rooms":
+        count = {}
+        with lock:
+            for data in clients.values():
+                count[data["room"]] = count.get(data["room"], 0) + 1
+        send(sock, "Rooms: " + ", ".join(f"{r} ({n})" for r, n in count.items()))
+
+    elif line.startswith("/join "):
+        new_room = line[6:].strip().lower()
+        if new_room == "" or " " in new_room:
+            send(sock, "Invalid room name.")
+        else:
+            with lock:
+                clients[nickname]["room"] = new_room
+            send_to_room(room, f"* {nickname} left the room.")
+            send_to_room(new_room, f"* {nickname} joined the room.", exclude=nickname)
+            send(sock, f"You are now in the '{new_room}' room.")
+
+    elif line.startswith("/msg "):
+        parts = line.split(" ", 2)   # ["/msg", "target", "text"]
+        if len(parts) < 3:
+            send(sock, "Usage: /msg <nickname> <text>")
+        else:
+            target, text = parts[1], parts[2]
+            with lock:
+                target_data = clients.get(target)
+            if target_data is None:
+                send(sock, "User not found.")
+            else:
+                send(target_data["sock"], f"[private from {nickname}] {text}")
+                send(sock, f"[private to {target}] {text}")
+
+    elif line.startswith("/"):
+        send(sock, "Unknown command. Type /help.")
+
+    else:
+        send_to_room(room, f"[{room}] {nickname}: {line}")
+
+    return True
+
+
+def handle_client(sock, address):
+    """Function run by a separate thread for each connected client."""
+    nickname = None
+    buffer = b""
+    send(sock, "Enter your nickname:")
+    try:
+        while True:
+            data = sock.recv(1024)
+            if not data:           # empty recv = client closed the connection
+                break
+            buffer += data
+            # TCP may merge or split messages, so we separate them by line breaks
+            while b"\n" in buffer:
+                line, buffer = buffer.split(b"\n", 1)
+                line = line.decode("utf-8", errors="replace").strip()
+                if line == "":
+                    continue
+                if nickname is None:
+                    nickname = register(sock, line)
+                    if nickname:
+                        print(f"[+] {nickname} connected from {address}")
+                elif not handle_message(nickname, line):
+                    return
+    except OSError:
+        pass  # client dropped abruptly
+    finally:
+        if nickname:
+            with lock:
+                room = clients.pop(nickname)["room"]
+            send_to_room(room, f"* {nickname} disconnected.")
+            print(f"[-] {nickname} disconnected")
+        sock.close()
+
+
+def main():
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind((HOST, PORT))
+    server.listen()
+    # accept() waits at most 1 second at a time, so Ctrl+C works on Windows too
+    server.settimeout(1.0)
+    print(f"Server listening on port {PORT}. Press Ctrl+C to stop.")
+    try:
+        while True:
+            try:
+                conn, address = server.accept()
+            except socket.timeout:
+                continue           # nobody connected; check Ctrl+C and wait again
+            conn.settimeout(None)  # client sockets wait without a time limit
+            t = threading.Thread(target=handle_client, args=(conn, address), daemon=True)
+            t.start()
+    except KeyboardInterrupt:
+        print("\nServer stopped.")
+    finally:
+        server.close()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### src/client.py
+
+```python
+import socket
+import sys
+import threading
+
+PORT = 5050
+
+
+def receive(sock):
+    """Thread that keeps waiting for messages from the server."""
+    while True:
+        try:
+            data = sock.recv(1024)
+        except OSError:
+            break
+        if not data:           # server closed the connection
+            break
+        print(data.decode("utf-8", errors="replace"), end="")
+    print("Connection closed.")
+
+
+def main():
+    # The server IP can be passed on the command line; default is this machine
+    host = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.connect((host, PORT))
+    except OSError as error:
+        print(f"Could not connect to {host}:{PORT} ({error})")
+        return
+
+    # Receiving thread: lets the user read and type at the same time
+    t = threading.Thread(target=receive, args=(sock,), daemon=True)
+    t.start()
+
+    # The main thread reads the keyboard and sends to the server
+    try:
+        while True:
+            text = input()
+            sock.sendall((text + "\n").encode("utf-8"))
+            if text.strip() == "/quit":
+                t.join(timeout=1)   # wait for the server's "Goodbye!"
+                break
+    except (EOFError, KeyboardInterrupt, OSError):
+        pass
+    sock.close()
+
+
+if __name__ == "__main__":
+    main()
+```
