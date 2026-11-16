@@ -144,10 +144,16 @@ def main():
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((HOST, PORT))
     server.listen()
+    # accept() waits at most 1 second at a time, so Ctrl+C works on Windows too
+    server.settimeout(1.0)
     print(f"Server listening on port {PORT}. Press Ctrl+C to stop.")
     try:
         while True:
-            conn, address = server.accept()
+            try:
+                conn, address = server.accept()
+            except socket.timeout:
+                continue           # nobody connected; check Ctrl+C and wait again
+            conn.settimeout(None)  # client sockets wait without a time limit
             t = threading.Thread(target=handle_client, args=(conn, address), daemon=True)
             t.start()
     except KeyboardInterrupt:
